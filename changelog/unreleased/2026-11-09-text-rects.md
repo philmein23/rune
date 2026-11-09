@@ -1,0 +1,1 @@
+- `Cx::text_rects(key, ranges)` reads per-line boxes for many byte ranges of a text or `text_input` in one layout read, and `Picked::text_index` gives the byte offset of the text under a picked point, so a view can draw marks over an editable document and a context menu can name the word under it.

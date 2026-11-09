@@ -33,7 +33,7 @@ use super::key_index::{self, KeyIndex};
 
 #[path = "selection/rects.rs"]
 mod selection_rects;
-pub(crate) use selection_rects::{SELECTION, SelectedRange, boxes_moved};
+pub(crate) use selection_rects::{SELECTION, SelectedRange, TEXT_RECTS, TextBoxes, boxes_moved, text_boxes_moved};
 
 /// Extra measurements one commit may take while a read moves.
 const PASSES: usize = 2;
@@ -137,6 +137,8 @@ pub(crate) fn note_read_at(reads: &mut LayoutReads, key: &str, same: Option<Same
 pub(crate) struct LayoutRects {
     rects: HashMap<String, Option<[f32; 4]>>,
     pub(crate) selection: Rc<[[f32; 4]]>,
+    /// The line boxes of each `Cx::text_rects` read, by its read key.
+    pub(crate) text: HashMap<String, TextBoxes>,
 }
 
 impl std::ops::Deref for LayoutRects {
@@ -323,7 +325,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn layout_of(&self, nodes: &[Node], index: Option<&KeyIndex>, key: &str) -> Option<[f32; 4]> {
-        if key == SELECTION { return None; }
+        if key == SELECTION || key.starts_with(TEXT_RECTS) { return None; }
         let (key, scrolled) = key.strip_prefix(WINDOW).map_or((key, false), |key| (key, true));
         let first = match index {
             Some(index) => index.first(nodes, key),
@@ -363,14 +365,18 @@ impl<S: 'static> Runtime<S> {
             Some((nodes, ranges)) => self.selection_boxes_in(nodes, ranges),
             None => self.selection_boxes(),
         });
+        // Text rects are unscrolled and change only when a commit lays out again.
+        let text = pass.map(|(nodes, _)| self.text_reads_in(nodes, index, &reads)).unwrap_or_default();
         let rects = &mut self.layout_seen.rects;
         let moved = reads.iter().zip(&now).position(|(r, rect)| rects.get(&r.key).is_none_or(|old| r.moved(*old, *rect)));
-        let changed = moved.is_some() || boxes.as_ref().is_some_and(|b| boxes_moved(&rects.selection, b));
+        let text_moved = text.iter().any(|(k, b)| rects.text.get(k).is_none_or(|old| text_boxes_moved(old, b)));
+        let changed = moved.is_some() || text_moved || boxes.as_ref().is_some_and(|b| boxes_moved(&rects.selection, b));
         // The once-a-frame check names the read for the scroll warning.
         #[cfg(debug_assertions)]
         if !nodes_given && let Some(k) = moved { self.watch.meter.read(&reads[k].key, reads[k].at); }
         if changed || force {
             if let Some(b) = boxes { rects.selection = b.into(); }
+            rects.text.extend(text);
             for (r, rect) in reads.iter().zip(now) {
                 match rects.get_mut(&r.key) {
                     Some(seen) => *seen = rect,
@@ -423,6 +429,7 @@ impl<S: 'static> Runtime<S> {
         if !settled { self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some((&measured.nodes, &measured.selection)), true); }
         let LayoutSeen { rects, reads } = &mut self.layout_seen;
         rects.retain(|k, _| reads.iter().any(|r| r.key == *k));
+        rects.text.retain(|k, _| reads.iter().any(|r| r.key == *k));
         if !rects.contains_key(SELECTION) { rects.selection = Rc::default(); }
         measured
     }

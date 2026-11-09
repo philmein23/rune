@@ -7,6 +7,12 @@ use super::*;
 
 /// The layout-read key `Cx::selection_rects` reads under.
 pub(crate) const SELECTION: &str = "\u{1}selection";
+/// The start of the layout-read key `Cx::text_rects` reads under; the element key and the
+/// ranges follow, so a read of other ranges is another read.
+pub(crate) const TEXT_RECTS: &str = "\u{1}text-rects\u{1}";
+
+/// One list of line boxes per range of a `Cx::text_rects` read.
+pub(crate) type TextBoxes = Rc<[Vec<[f32; 4]>]>;
 
 impl<S> Cx<S> {
     /// The line boxes of the text selection, `[x, y, w, h]` each in window points after
@@ -28,6 +34,21 @@ impl<S> Cx<S> {
         crate::memo::read_selection(&self.layout.selection);
         self.layout.selection.to_vec()
     }
+
+    /// The line boxes of each byte range of the text element keyed `key` (a `text` or a
+    /// `text_input`), one list per range in `ranges`, one `[x, y, w, h]` per line the range
+    /// touches. Like [`Cx::layout`], boxes are window points as if every scroll viewport were at
+    /// its origin, so scrolling re-runs no view. A range past the end of the text is clamped.
+    ///
+    /// One read costs one lookup of the element plus the ranges, whatever their number. A view
+    /// that reads new ranges gets empty lists on its first pass and the boxes on the next, in
+    /// the same commit. In a `text_input`, offsets are of `edit.text`. Read it outside any
+    /// `memo`: a memo isn't rebuilt when these boxes move.
+    pub fn text_rects(&self, key: &str, ranges: &[std::ops::Range<usize>]) -> Vec<Vec<[f32; 4]>> {
+        let read = text_read_key(key, ranges);
+        layout_read::note_read(&mut self.layout_reads.borrow_mut(), &read, None);
+        self.layout.text.get(&read).map_or_else(|| vec![Vec::new(); ranges.len()], |b| b.to_vec())
+    }
 }
 
 /// Bytes `a..b` of the text at a path.
@@ -37,6 +58,30 @@ pub(crate) type SelectedRange = (String, usize, usize);
 /// other lacks.
 pub(crate) fn boxes_moved(a: &[[f32; 4]], b: &[[f32; 4]]) -> bool {
     a.len() != b.len() || a.iter().zip(b).any(|(x, y)| layout_read::moved(Some(*x), Some(*y)))
+}
+
+/// [`boxes_moved`] across every range of a `Cx::text_rects` read.
+pub(crate) fn text_boxes_moved(a: &[Vec<[f32; 4]>], b: &[Vec<[f32; 4]>]) -> bool {
+    a.len() != b.len() || a.iter().zip(b).any(|(x, y)| boxes_moved(x, y))
+}
+
+fn text_read_key(key: &str, ranges: &[std::ops::Range<usize>]) -> String {
+    use std::fmt::Write;
+    let mut read = format!("{TEXT_RECTS}{key}\u{1}");
+    for r in ranges {
+        let _ = write!(read, "{}-{},", r.start, r.end);
+    }
+    read
+}
+
+/// The element key and byte ranges of a `Cx::text_rects` read key.
+fn parse_text_read(read: &str) -> Option<(&str, Vec<(usize, usize)>)> {
+    let (key, ranges) = read.strip_prefix(TEXT_RECTS)?.split_once('\u{1}')?;
+    let ranges = ranges.split_terminator(',').filter_map(|r| {
+        let (a, b) = r.split_once('-')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    });
+    Some((key, ranges.collect()))
 }
 
 impl<S: 'static> Runtime<S> {
@@ -63,15 +108,44 @@ impl<S: 'static> Runtime<S> {
         out
     }
 
+    /// The line boxes of every `Cx::text_rects` read in `reads`, laid out in `nodes`, unscrolled.
+    pub(super) fn text_reads_in(&self, nodes: &[Node], index: Option<&key_index::KeyIndex>, reads: &LayoutReads) -> Vec<(String, TextBoxes)> {
+        let mut out = Vec::new();
+        for read in reads {
+            let Some((key, ranges)) = parse_text_read(&read.key) else { continue };
+            let found = match index {
+                Some(index) => index.first(nodes, key),
+                None => key_index::scan_first(nodes, key),
+            };
+            let boxes: Vec<Vec<[f32; 4]>> = match found {
+                Some(j) => {
+                    let rect = self.placed(nodes, j, false);
+                    ranges.iter().map(|&(a, b)| {
+                        let mut line = Vec::new();
+                        self.text_boxes_at(&nodes[j], rect, a, b, &mut line);
+                        line
+                    }).collect()
+                }
+                None => vec![Vec::new(); ranges.len()],
+            };
+            out.push((read.key.clone(), boxes.into()));
+        }
+        out
+    }
+
     /// Pushes the line boxes of bytes `a..b` of node `j`'s text onto `out`.
     fn text_boxes(&self, nodes: &[Node], j: usize, a: usize, b: usize, out: &mut Vec<[f32; 4]>) {
-        let n = &nodes[j];
+        self.text_boxes_at(&nodes[j], self.laid_out(nodes, j), a, b, out);
+    }
+
+    /// Pushes the line boxes of bytes `a..b` of `n`'s text, laid out in `rect`, onto `out`.
+    fn text_boxes_at(&self, n: &Node, rect: [f32; 4], a: usize, b: usize, out: &mut Vec<[f32; 4]>) {
         let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) else { return };
         let len = spec.content.len();
         let (a, b) = (a.min(len), b.min(len));
         if a >= b { return; }
         let (a, b) = n.elided.map_or((a, b), |e| e.range(a, b));
-        let [x, y, w, h] = self.laid_out(nodes, j);
+        let [x, y, w, h] = rect;
         let s = self.env.scale;
         let [ox, oy] = links::origin(n, spec, layout, [x, y, x + w, y + h], s, 1.0);
         for (bb, _) in crate::text::range_boxes(layout, a, b, true) {

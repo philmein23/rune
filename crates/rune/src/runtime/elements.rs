@@ -80,6 +80,7 @@ pub struct ElementInfo {
 pub struct Picked {
     path: String,
     key: Option<String>,
+    text_index: Option<usize>,
 }
 
 /// Options for [`Runtime::element_at_with`] and its siblings. Fields are private, so options can
@@ -106,6 +107,10 @@ impl Picked {
     pub fn path(&self) -> &str { &self.path }
     /// Its key ([`El::key`]), if it has one.
     pub fn key(&self) -> Option<&str> { self.key.as_deref() }
+    /// The byte offset of the text under the point, when the element found has text. In a
+    /// `text_input`, an offset of `edit.text`. A handler over text covered by another element
+    /// asks with [`Tx::element_at_in`](crate::Tx::element_at_in), scoped to the text.
+    pub fn text_index(&self) -> Option<usize> { self.text_index }
 }
 
 /// What an element presents beyond its rect and opacity, as of the last frame
@@ -462,6 +467,7 @@ impl<S: 'static> Runtime<S> {
         }).map(|i| Picked {
             path: self.nodes[i].path.clone(),
             key: self.nodes[i].key.clone(),
+            text_index: self.text_index_at(i, x, y),
         })
     }
 
