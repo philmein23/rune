@@ -106,3 +106,16 @@ fn a_point_on_a_word_finds_its_offset_after_scrolling() {
     let at = rt.element_at_in("doc", mid_x, mid_y - 40.0).and_then(|p| p.text_index()).expect("text after scrolling");
     assert!(range("twenty").contains(&at), "{at} is inside the word after scrolling");
 }
+
+#[test]
+fn undo_depth_counts_steps_and_follows_undo() {
+    let mut e = TextEdit::new("");
+    assert_eq!(e.undo_depth(), 0);
+    e.insert("a");
+    e.insert("b");
+    assert_eq!(e.undo_depth(), 2);
+    e.undo();
+    assert_eq!(e.undo_depth(), 1);
+    e.redo();
+    assert_eq!(e.undo_depth(), 2);
+}

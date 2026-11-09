@@ -254,6 +254,12 @@ impl TextEdit {
         r
     }
 
+    /// How many steps undo can take back. An app keeping its own state beside the text uses it
+    /// to tell which text step that state belongs to.
+    pub fn undo_depth(&self) -> usize {
+        self.history.undo.len()
+    }
+
     /// Undo one typing group or discrete edit. Active IME composition is cancelled first.
     pub fn undo(&mut self) {
         if self.secure || self.group.0.is_some() { return; }

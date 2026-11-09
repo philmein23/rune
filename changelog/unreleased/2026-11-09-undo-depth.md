@@ -1,0 +1,1 @@
+- `TextEdit::undo_depth` reports how many steps undo can take back, so an app keeping its own state beside the text can tell which step that state belongs to.
